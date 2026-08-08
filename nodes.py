@@ -17,10 +17,13 @@ from PIL import Image
 import folder_paths
 import comfy.model_management as mm
 
+_llama_cpp_import_error = None
+
 try:
     from llama_cpp import Llama
-except Exception:
+except Exception as exc:
     Llama = None
+    _llama_cpp_import_error = exc
 
 try:
     from llama_cpp import GGML_TYPE_Q8_0
@@ -233,6 +236,14 @@ def _llama构造参数是否可用(param_name: str) -> bool | None:
     return param_name in sig.parameters
 
 
+def _抛出llama_cpp不可用错误() -> None:
+    message = "未检测到 llama-cpp-python（llama_cpp）。请先安装/更新该依赖。"
+    if _llama_cpp_import_error is not None:
+        detail = f"{type(_llama_cpp_import_error).__name__}: {_llama_cpp_import_error}"
+        raise RuntimeError(f"{message}\n原始导入错误：{detail}") from _llama_cpp_import_error
+    raise RuntimeError(message)
+
+
 def _解析kv缓存类型(value: str | None) -> int | None:
     if not value or value == 默认KV缓存类型:
         return None
@@ -291,32 +302,40 @@ def _重置llm推理状态(llm) -> None:
         pass
 
 
+def _创建多模态聊天处理器(handler_class, mmproj_path: str, **kwargs):
+    try:
+        return handler_class(mmproj_path=mmproj_path, **kwargs)
+    except TypeError as exc:
+        error_text = str(exc)
+        rejects_mmproj_path = "mmproj_path" in error_text and "unexpected" in error_text.lower()
+        requires_clip_model_path = "clip_model_path" in error_text and "required" in error_text.lower()
+        if not (rejects_mmproj_path or requires_clip_model_path):
+            raise
+        return handler_class(clip_model_path=mmproj_path, **kwargs)
+
+
 def _创建qwen35聊天处理器(mmproj_path: str, *, enable_thinking: bool, preserve_thinking: bool):
     if Qwen35ChatHandler is None:
         raise RuntimeError("当前 llama-cpp-python 不支持 Qwen35ChatHandler，请更新 llama-cpp-python。")
 
     candidate_kwargs = [
         {
-            "clip_model_path": mmproj_path,
             "enable_thinking": enable_thinking,
             "add_vision_id": True,
             "preserve_thinking": preserve_thinking,
             "verbose": False,
         },
         {
-            "clip_model_path": mmproj_path,
             "enable_thinking": enable_thinking,
             "preserve_thinking": preserve_thinking,
             "verbose": False,
         },
         {
-            "clip_model_path": mmproj_path,
             "enable_thinking": enable_thinking,
             "add_vision_id": True,
             "verbose": False,
         },
         {
-            "clip_model_path": mmproj_path,
             "enable_thinking": enable_thinking,
             "verbose": False,
         },
@@ -325,7 +344,7 @@ def _创建qwen35聊天处理器(mmproj_path: str, *, enable_thinking: bool, pre
     last_error = None
     for kwargs in candidate_kwargs:
         try:
-            return Qwen35ChatHandler(**kwargs)
+            return _创建多模态聊天处理器(Qwen35ChatHandler, mmproj_path, **kwargs)
         except TypeError as exc:
             last_error = exc
 
@@ -562,7 +581,7 @@ class _QwenStorage:
     @classmethod
     def load(cls, config: dict) -> _QwenModel:
         if Llama is None:
-            raise RuntimeError("未检测到 llama-cpp-python（llama_cpp）。请先安装/更新该依赖。")
+            _抛出llama_cpp不可用错误()
 
         if cls.model and cls.model.settings == config:
             return cls.model
@@ -595,12 +614,12 @@ class _QwenStorage:
                     raise RuntimeError("当前 llama-cpp-python 不支持 Qwen3VLChatHandler，请更新 llama-cpp-python。")
                 # Qwen3 的 thinking 参数名在不同版本可能不同，这里做兜底。
                 try:
-                    chat_handler = Qwen3VLChatHandler(clip_model_path=mmproj_path, force_reasoning=think, verbose=False)
+                    chat_handler = _创建多模态聊天处理器(Qwen3VLChatHandler, mmproj_path, force_reasoning=think, verbose=False)
                 except Exception:
                     try:
-                        chat_handler = Qwen3VLChatHandler(clip_model_path=mmproj_path, use_think_prompt=think, verbose=False)
+                        chat_handler = _创建多模态聊天处理器(Qwen3VLChatHandler, mmproj_path, use_think_prompt=think, verbose=False)
                     except Exception:
-                        chat_handler = Qwen3VLChatHandler(clip_model_path=mmproj_path, verbose=False)
+                        chat_handler = _创建多模态聊天处理器(Qwen3VLChatHandler, mmproj_path, verbose=False)
             elif family in ("Qwen3.5-VL", "Qwen3.6-VL"):
                 chat_handler = _创建qwen35聊天处理器(
                     mmproj_path,
@@ -676,7 +695,7 @@ class _Gemma4Storage:
     @classmethod
     def load(cls, config: dict) -> _QwenModel:
         if Llama is None:
-            raise RuntimeError("未检测到 llama-cpp-python（llama_cpp）。请先安装/更新该依赖。")
+            _抛出llama_cpp不可用错误()
 
         if Gemma4ChatHandler is None:
             raise RuntimeError("当前 llama-cpp-python 不支持 Gemma4ChatHandler，请先合入或安装带 Gemma4 支持的版本。")
@@ -703,8 +722,9 @@ class _Gemma4Storage:
 
         chat_handler = None
         if mmproj_path:
-            chat_handler = Gemma4ChatHandler(
-                clip_model_path=mmproj_path,
+            chat_handler = _创建多模态聊天处理器(
+                Gemma4ChatHandler,
+                mmproj_path,
                 enable_thinking=think,
                 verbose=False,
             )
@@ -843,7 +863,7 @@ class QwenTE图像推理:
                 "系统提示词": ("STRING", {"default": 默认图片系统提示词, "multiline": True}),
                 "最多帧数": ("INT", {"default": 24, "min": 2, "max": 1024, "step": 1, "tooltip": "视频模式下从输入图片序列中均匀抽取的帧数。"}),
                 "最大边长": ("INT", {"default": 1024, "min": 128, "max": 16384, "step": 64, "tooltip": "对输入图片做缩放以提速（取最长边）。"}),
-                "最大生成token": ("INT", {"default": 1024, "min": 20, "max": 8192, "step": 1}),
+                "最大生成token": ("INT", {"default": 1024, "min": 20, "max": 0xffffffffffffffff, "step": 1, "tooltip": "UI 使用 64 位整数上限，实际生成长度仍受模型上下文长度与可用显存约束。"}),
                 "温度": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "top_k": ("INT", {"default": 20, "min": 0, "max": 200, "step": 1}),
@@ -852,6 +872,7 @@ class QwenTE图像推理:
                 "存在惩罚": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "step": 1, "control_after_generate": True, "tooltip": "随机种子。可用 ComfyUI 的生成后控制来固定、递增、递减或随机。"}),
                 "输出think块": ("BOOLEAN", {"default": True, "tooltip": "开启=保留模型原始 `<think>...</think>` 输出；关闭=仅在最终结果里移除 think 块。"}),
+                "生成后自动卸载模型": ("BOOLEAN", {"default": False, "tooltip": "生成完成后自动执行 Qwen llama TE 卸载模型，释放模型显存。"}),
             },
             "optional": {
                 "图片": ("IMAGE",),
@@ -880,6 +901,7 @@ class QwenTE图像推理:
         存在惩罚,
         seed,
         输出think块,
+        生成后自动卸载模型=False,
         图片=None,
     ):
         # 卸载后 / 引用失效时：自动重载与同步到当前有效模型
@@ -1003,7 +1025,10 @@ class QwenTE图像推理:
         if mm.processing_interrupted():
             raise mm.InterruptProcessingException()
 
-        return (text.lstrip().removeprefix(": ").strip(),)
+        result_text = text.lstrip().removeprefix(": ").strip()
+        if bool(生成后自动卸载模型):
+            _QwenStorage.unload()
+        return (result_text,)
 
 
 class QwenTE卸载模型:
