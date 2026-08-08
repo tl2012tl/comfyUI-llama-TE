@@ -93,6 +93,16 @@ def _列出llm文件() -> list[str]:
         return []
 
 
+def _获取_llm文件路径(filename: str) -> str:
+    """通过 ComfyUI 的模型注册表解析 LLM 文件路径。"""
+    _确保_llm目录已注册()
+    model_path = folder_paths.get_full_path("LLM", filename)
+    if model_path:
+        return model_path
+    # 兼容极旧版本 ComfyUI 或未注册 LLM 类别的情况。
+    return os.path.join(folder_paths.models_dir, "LLM", filename)
+
+
 def _图片转base64(image_tensor) -> str:
     """
     编码为 JPEG base64。
@@ -559,14 +569,14 @@ class _QwenStorage:
 
         cls.unload()
 
-        model_path = os.path.join(folder_paths.models_dir, "LLM", config["model"])
+        model_path = _获取_llm文件路径(config["model"])
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"找不到模型文件：{model_path}")
 
         mmproj = config.get("mmproj", "无")
         mmproj_path = None
         if mmproj and mmproj != "无":
-            mmproj_path = os.path.join(folder_paths.models_dir, "LLM", mmproj)
+            mmproj_path = _获取_llm文件路径(mmproj)
             if not os.path.exists(mmproj_path):
                 raise FileNotFoundError(f"找不到 mmproj 文件：{mmproj_path}")
 
@@ -676,14 +686,14 @@ class _Gemma4Storage:
 
         cls.unload()
 
-        model_path = os.path.join(folder_paths.models_dir, "LLM", config["model"])
+        model_path = _获取_llm文件路径(config["model"])
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"找不到模型文件：{model_path}")
 
         mmproj = config.get("mmproj", "无")
         mmproj_path = None
         if mmproj and mmproj != "无":
-            mmproj_path = os.path.join(folder_paths.models_dir, "LLM", mmproj)
+            mmproj_path = _获取_llm文件路径(mmproj)
             if not os.path.exists(mmproj_path):
                 raise FileNotFoundError(f"找不到 mmproj 文件：{mmproj_path}")
 
