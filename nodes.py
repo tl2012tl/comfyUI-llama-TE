@@ -47,6 +47,11 @@ except Exception:
     Qwen35ChatHandler = None
 
 try:
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
+except Exception:
+    ImmutableSandboxedEnvironment = None
+
+try:
     from llama_cpp.llama_chat_format import Gemma4ChatHandler
 except Exception:
     Gemma4ChatHandler = None
@@ -367,41 +372,75 @@ def _创建qwen35聊天处理器(
     if Qwen35ChatHandler is None:
         raise RuntimeError("当前 llama-cpp-python 不支持 Qwen35ChatHandler，请更新 llama-cpp-python。")
 
-    shared_kwargs = {"verbose": False}
+    # 不同版本的 llama_cpp 对 Qwen35ChatHandler 的参数约定不一致：
+    #  - 较新版本支持把 extra_template_arguments / chat_template_override 作为构造参数传入；
+    #  - 较旧版本（如 0.3.40 的 MTMDChatHandler）会硬性拒绝未知 kwargs，只能在实例创建后
+    #    直接写入 self.extra_template_arguments / self.chat_template 属性。
+    # 这里采用“签名自适应”：先尝试把这两个参数作为构造参数传入，若被 TypeError 拒绝，
+    # 则回退到实例化后写入属性的方式，从而兼容新旧两种签名。
+    extra_template_arguments = {}
     if reasoning_effort is not None:
-        shared_kwargs["extra_template_arguments"] = {"reasoning_effort": reasoning_effort}
-    if chat_template_override:
-        shared_kwargs["chat_template_override"] = chat_template_override
+        extra_template_arguments["reasoning_effort"] = reasoning_effort
 
     candidate_kwargs = [
         {
             "enable_thinking": enable_thinking,
             "add_vision_id": True,
             "preserve_thinking": preserve_thinking,
-            **shared_kwargs,
+            "verbose": False,
         },
         {
             "enable_thinking": enable_thinking,
             "preserve_thinking": preserve_thinking,
-            **shared_kwargs,
+            "verbose": False,
         },
         {
             "enable_thinking": enable_thinking,
             "add_vision_id": True,
-            **shared_kwargs,
+            "verbose": False,
         },
         {
             "enable_thinking": enable_thinking,
-            **shared_kwargs,
+            "verbose": False,
         },
     ]
 
-    last_error = None
+    # 先尝试“构造参数传入”模式（新签名）。
+    constructor_error = None
+    for kwargs in candidate_kwargs:
+        attempt = dict(kwargs)
+        if extra_template_arguments:
+            attempt["extra_template_arguments"] = dict(extra_template_arguments)
+        if chat_template_override:
+            attempt["chat_template_override"] = chat_template_override
+        try:
+            handler = _创建多模态聊天处理器(Qwen35ChatHandler, mmproj_path, **attempt)
+        except TypeError as exc:
+            constructor_error = exc
+            continue
+        return handler
+
+    # 构造参数传入失败，回退到“实例化后属性注入”模式（旧签名）。
+    last_error = constructor_error
     for kwargs in candidate_kwargs:
         try:
-            return _创建多模态聊天处理器(Qwen35ChatHandler, mmproj_path, **kwargs)
+            handler = _创建多模态聊天处理器(Qwen35ChatHandler, mmproj_path, **kwargs)
         except TypeError as exc:
             last_error = exc
+            continue
+
+        if extra_template_arguments:
+            handler.extra_template_arguments.update(extra_template_arguments)
+        if chat_template_override:
+            if ImmutableSandboxedEnvironment is None:
+                handler.chat_template = chat_template_override
+            else:
+                handler.chat_template = ImmutableSandboxedEnvironment(
+                    trim_blocks=True,
+                    lstrip_blocks=True,
+                ).from_string(chat_template_override)
+
+        return handler
 
     if last_error is not None:
         raise last_error
