@@ -4,8 +4,10 @@ import os
 import re
 import time
 
+from aiohttp import web
 import comfy.model_management as mm
 import folder_paths
+from server import PromptServer
 
 from .nodes import (
     _QwenStorage,
@@ -19,6 +21,27 @@ from .nodes import (
     _重置llm推理状态,
 )
 from .skill_loader import 获取skill, 读取reference, 读取skill正文
+
+
+@PromptServer.instance.routes.post("/qwen_te/unload")
+async def _卸载qwen_te模型接口(request):
+    prompt_queue = getattr(PromptServer.instance, "prompt_queue", None)
+    if prompt_queue is not None:
+        running, queued = prompt_queue.get_current_queue_volatile()
+        if running or queued:
+            return web.json_response(
+                {"ok": False, "error": "ComfyUI has running or queued tasks. Wait for the queue to become idle before unloading the model."},
+                status=409,
+            )
+
+    was_loaded = _QwenStorage.model is not None
+    _QwenStorage.unload()
+    print(
+        f"[comfyUI-llama-TE] Qwen model unload requested from multi-turn chat: "
+        f"{'unloaded' if was_loaded else 'no model was loaded'}",
+        flush=True,
+    )
+    return web.json_response({"ok": True, "unloaded": was_loaded})
 
 
 默认聊天系统提示词 = "你是一个有帮助的AI助手。"
@@ -663,7 +686,7 @@ class QwenTE多轮对话:
 
         n_ctx = int(getattr(qwen_model, "settings", {}).get("n_ctx", 8192))
         history_before_context_trim = len(history)
-        history = _按上下文裁剪(
+        model_history = _按上下文裁剪(
             llm,
             history,
             system_text,
@@ -672,12 +695,12 @@ class QwenTE多轮对话:
             n_ctx,
             current_image_count=len(current_images),
         )
-        trimmed_message_count = history_before_context_trim - len(history)
+        trimmed_message_count = history_before_context_trim - len(model_history)
 
         messages = []
         if system_text:
             messages.append({"role": "system", "content": system_text})
-        messages.extend(_构建模型历史(history, max_edge))
+        messages.extend(_构建模型历史(model_history, max_edge))
         messages.append({"role": "user", "content": _构建用户内容(user_text, current_images, max_edge)})
 
         effective_temperature, effective_top_p, effective_top_k = _应用qwen38推荐采样(
@@ -722,19 +745,19 @@ class QwenTE多轮对话:
                 break
             flow_state["loaded_references"].extend(requested)
             system_text = _构建skill系统提示词(str(settings["系统提示词"] or "").strip(), skill, flow_state)
-            history_before_reference_trim = len(history)
-            history = _按上下文裁剪(
+            history_before_reference_trim = len(model_history)
+            model_history = _按上下文裁剪(
                 llm,
-                history,
+                model_history,
                 system_text,
                 user_text,
                 max_tokens,
                 n_ctx,
                 current_image_count=len(current_images),
             )
-            trimmed_message_count += history_before_reference_trim - len(history)
+            trimmed_message_count += history_before_reference_trim - len(model_history)
             messages = [{"role": "system", "content": system_text}]
-            messages.extend(_构建模型历史(history, max_edge))
+            messages.extend(_构建模型历史(model_history, max_edge))
             messages.append({"role": "user", "content": _构建用户内容(user_text, current_images, max_edge)})
 
         if mm.processing_interrupted():
@@ -773,14 +796,18 @@ class QwenTE多轮对话:
         else:
             options = []
             final_result = ""
+        context_history = model_history + [user_history_item, assistant_history_item]
         context_state = _构建上下文状态(
             llm,
             system_text,
-            history,
+            context_history,
             max_tokens,
             n_ctx,
             max_rounds,
             trimmed_messages=trimmed_message_count,
+        )
+        context_state["current_rounds"] = sum(
+            1 for message in history if message.get("role") == "user"
         )
         return _构建返回(
             history,
