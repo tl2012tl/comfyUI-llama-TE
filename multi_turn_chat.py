@@ -20,7 +20,7 @@ from .nodes import (
     _规范化随机种子,
     _重置llm推理状态,
 )
-from .skill_loader import 获取skill, 读取reference, 读取skill正文
+from .skill_loader import 构建内联skill系统提示词, 获取skill, 读取reference, 读取skill正文
 
 
 @PromptServer.instance.routes.post("/qwen_te/unload")
@@ -134,6 +134,7 @@ def _解析对话历史(raw_history: str) -> list[dict]:
                 message["flow_before"] = {
                     "skill": str(flow_before.get("skill") or ""),
                     "skill_name": str(flow_before.get("skill_name") or "")[:80],
+                    "inline_file_id": str(flow_before.get("inline_file_id") or "")[:32],
                     "stage": str(flow_before.get("stage") or "未开始")[:40],
                     "loaded_references": [
                         str(reference)
@@ -341,7 +342,14 @@ def _构建模型历史(history: list[dict], max_edge: int) -> list[dict]:
 
 
 def _默认流程状态() -> dict:
-    return {"skill": "", "skill_name": "", "stage": "未开始", "loaded_references": [], "final_result": ""}
+    return {
+        "skill": "",
+        "skill_name": "",
+        "inline_file_id": "",
+        "stage": "未开始",
+        "loaded_references": [],
+        "final_result": "",
+    }
 
 
 def _解析流程状态(raw_state: str) -> dict:
@@ -354,6 +362,7 @@ def _解析流程状态(raw_state: str) -> dict:
         if isinstance(value, dict):
             state["skill"] = str(value.get("skill") or "")
             state["skill_name"] = str(value.get("skill_name") or "")[:80]
+            state["inline_file_id"] = str(value.get("inline_file_id") or "")[:32]
             state["stage"] = str(value.get("stage") or "未开始")[:40]
             state["loaded_references"] = [
                 str(item) for item in value.get("loaded_references", []) if isinstance(item, str)
@@ -474,6 +483,15 @@ def _构建skill系统提示词(base_system: str, skill: dict, flow_state: dict)
     parts.extend(loaded)
     parts.append(SKILL执行协议)
     return "\n\n".join(part for part in parts if part)
+
+
+def _构建内联skill对话系统提示词(base_system: str, inline_file: dict) -> str:
+    return 构建内联skill系统提示词(
+        base_system,
+        inline_file.get("name") or "loaded_skill.txt",
+        inline_file.get("content") or "",
+        SKILL执行协议,
+    )
 
 
 def _默认聊天设置() -> dict:
@@ -661,23 +679,37 @@ class QwenTE多轮对话:
         skill = None
         if isinstance(skill加载器, dict):
             selected_id = str(skill加载器.get("selected") or "").strip()
-            if selected_id and flow_state.get("skill") and flow_state["skill"] != selected_id:
-                flow_state = _默认流程状态()
-            if selected_id:
-                flow_state["skill"] = selected_id
-                skill = 获取skill(selected_id)
-            elif not flow_state.get("skill"):
-                skill_id = _自动选择skill(llm, skill加载器.get("skills") or [], user_text)
-                flow_state["skill"] = skill_id
-                skill = 获取skill(skill_id)
+            inline_file = skill加载器.get("inline_file")
+            if isinstance(inline_file, dict) and str(inline_file.get("content") or "").strip():
+                inline_file_id = str(inline_file.get("id") or "").strip()
+                if flow_state.get("skill") or flow_state.get("inline_file_id") != inline_file_id:
+                    flow_state = _默认流程状态()
+                flow_state["inline_file_id"] = inline_file_id
+                flow_state["skill_name"] = str(inline_file.get("name") or "loaded_skill.txt")[:80]
+                if system_text == 默认聊天系统提示词:
+                    system_text = ""
+                system_text = _构建内联skill对话系统提示词(system_text, inline_file)
             else:
-                skill = 获取skill(flow_state["skill"])
-            if skill is None:
-                raise ValueError("Skill 已不存在，请刷新 Skill加载器并重新选择。")
-            flow_state["skill_name"] = skill["name"]
-            if system_text == 默认聊天系统提示词:
-                system_text = ""
-            system_text = _构建skill系统提示词(system_text, skill, flow_state)
+                if flow_state.get("inline_file_id"):
+                    flow_state = _默认流程状态()
+                if selected_id and flow_state.get("skill") and flow_state["skill"] != selected_id:
+                    flow_state = _默认流程状态()
+                if selected_id:
+                    flow_state["skill"] = selected_id
+                    skill = 获取skill(selected_id)
+                elif not flow_state.get("skill"):
+                    skill_id = _自动选择skill(llm, skill加载器.get("skills") or [], user_text)
+                    flow_state["skill"] = skill_id
+                    skill = 获取skill(skill_id)
+                else:
+                    skill = 获取skill(flow_state["skill"])
+                if skill is None:
+                    raise ValueError("Skill 已不存在，请刷新 Skill加载器并重新选择。")
+                flow_state["inline_file_id"] = ""
+                flow_state["skill_name"] = skill["name"]
+                if system_text == 默认聊天系统提示词:
+                    system_text = ""
+                system_text = _构建skill系统提示词(system_text, skill, flow_state)
         elif not system_text:
             system_text = 默认聊天系统提示词
         history_image_count = sum(len(item.get("images") or []) for item in history)
